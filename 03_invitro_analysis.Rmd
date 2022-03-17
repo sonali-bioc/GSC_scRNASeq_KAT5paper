@@ -1,0 +1,120 @@
+---
+title: "Building the GSC 827 integrated reference"
+author: "Sonali Arora"
+date: "March 17, 2022"
+output:
+  html_document:
+    toc: true
+    theme: united
+---
+
+```{r}
+rm(list=ls())
+
+#------------------------
+# setup section 
+#-----------------------
+library(Seurat)
+library(ggplot2)
+library(grid)
+library(gridExtra)
+library(monocle3)
+library(SeuratWrappers)
+library(clusterProfiler)
+library(enrichR)
+library(writexl)
+
+
+gg_color_hue <- function(n) {
+  hues = seq(15, 375, length = n + 1)
+  hcl(h = hues, l = 65, c = 100)[1:n]
+}
+
+# read in kat5ko dataset
+data <- Read10X(data.dir = data_dir)
+
+# read in cd8ko dataset
+data2 <- Read10X(data.dir = data_dir)
+
+identical ( rownames(data), rownames(data2))
+data = cbind(data, data2)
+
+seurat1 <- CreateSeuratObject(counts =  data,  assay = "RNA", min.cells = 10)
+mito.genes <- grep("MT", rownames(seurat1))
+rb.genes <- grep("RP", rownames(seurat1))
+percent.mito <- Matrix::colSums(seurat1@assays[["RNA"]][mito.genes, ])/Matrix::colSums(seurat1@assays[["RNA"]])
+percent.rb <- Matrix::colSums(seurat1@assays[["RNA"]][rb.genes, ])/Matrix::colSums(seurat1@assays[["RNA"]])
+
+# add to meta.data
+seurat1 <- AddMetaData(seurat1, percent.mito, col.name = "percent.mito")
+seurat1 <- AddMetaData(seurat1, percent.rb, col.name = "percent.ribo")
+seurat1 <- AddMetaData(seurat1, barcodes$barcode, col.name = "barcode")
+seurat1 <- AddMetaData(seurat1, barcodes$type, col.name = "type")
+seurat1 <- AddMetaData(seurat1, barcodes$sampleName, col.name = "sampleName")
+seurat1 <- AddMetaData(seurat1, barcodes$original_clustering, col.name = "original_clustering")
+
+seurat1 <- SCTransform(seurat1, vars.to.regress = "nCount_RNA", verbose = FALSE)
+seurat1 <- RunPCA(seurat1, dims = 1:30)
+seurat1 <- RunUMAP(seurat1,   dims = 1:30)
+seurat1 <- FindNeighbors(seurat1,   dims = 1:30)
+seurat1 <- FindClusters(seurat1)
+
+m1 = DimPlot(seurat1, reduction = "umap", label=T) + ggtitle ("new/re-clustering")
+m3 = DimPlot(seurat1, reduction = "umap", group.by="sampleName")
+m4 = DimPlot(seurat1, reduction = "umap", group.by="type")
+
+# cell cycle scoring - ccSeurat
+s.genes <- cc.genes$s.genes
+g2m.genes <- cc.genes$g2m.genes
+seurat1 <- CellCycleScoring(object=seurat1, s.features=s.genes, g2m.features=g2m.genes, set.ident=FALSE)
+c1 =  DimPlot(seurat1, reduction = "umap", group.by="Phase") + ggtitle("ccSeurat")
+
+
+# violin plots
+cluster_no = length(unique(seurat1$seurat_clusters))
+my_5cols = gg_color_hue(cluster_no)
+v1 = VlnPlot(object = seurat1, features= "nFeature_RNA", split.by="seurat_clusters", cols = my_5cols,  pt.size=0.1)
+v2 = VlnPlot(object = seurat1, features= "nCount_RNA", split.by="seurat_clusters", cols = my_5cols ,  pt.size=0.1)
+v3 = VlnPlot(object = seurat1, features= "percent.ribo", split.by="seurat_clusters", cols = my_5cols ,  pt.size=0.1)
+v4 = VlnPlot(object = seurat1, features= "percent.mito", split.by="seurat_clusters", cols = my_5cols ,  pt.size=0.1)
+
+# Find differentially expressed genes in each cluster
+log2_thres = log2(1.25)
+fdr_thres=0.05
+cluster_markers= FindAllMarkers(seurat1, logfc.threshold = 0.25)
+cluster_no = unique(cluster_markers$cluster)
+sp = split(cluster_markers, cluster_markers$cluster)
+names(sp) = paste0("cluster-", names(sp))
+
+
+```
+
+# Make figures and save results. 
+
+```{r}
+
+pdf(paste0(tag, ".pdf"), width =15, height = 10)
+# umaps 
+lst = list(m1, m3, m4)
+grid.arrange(grobs = lst, layout_matrix = rbind(c(1,2),c( 3,NA)), top = "")
+
+# violin plots. 
+lst4 = list(v1, v2, v3, v4)
+grid.arrange(grobs = lst4, layout_matrix = rbind(c(1,2,3),c( 4,5,6)))
+dev.off()
+
+# make heatmap 
+seurat1@meta.data$seurat_clusters = as.numeric(as.character(seurat1@meta.data$seurat_clusters))
+goi = read.delim("data/heatmap_genes_1_24_2022.txt", header=T, stringsAsFactors=FALSE)$Gene
+pdf("Heatmap_1_24_2022_GsC827_invitro_CD8KO_KAT5KO.pdf", width = 5)
+DoHeatmap(object = s1, features=unlist(goi), group.by="seurat_clusters")
+dev.off()
+
+# save enriched genes for each cluster
+write_xlsx(sp, path = paste0(tag, "_scTransform_Markers_by_cluster.xlsx"))
+
+# save seurat object.
+saveRDS(seurat1, file = file.path("seurat_objects", paste0(tag, ".Rds")) )
+
+```
+
