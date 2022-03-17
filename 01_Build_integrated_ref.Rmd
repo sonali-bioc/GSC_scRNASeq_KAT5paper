@@ -1,0 +1,230 @@
+---
+title: "Building the GSC 827 integrated reference"
+author: " Sonali Arora"
+date: "March 15, 2022"
+output:
+  html_document:
+    toc: true
+    theme: united
+---
+
+# Introduction 
+
+In this section, we show we aligned the data and built the integrated scRNASeq GSC 827 tumor.
+
+```{r }
+library(Seurat)
+library(ggplot2)
+library(grid)
+library(gridExtra)
+library(monocle3)
+library(SeuratWrappers)
+library(clusterProfiler)
+library(enrichR)
+library(writexl)
+
+gg_color_hue <- function(n) {
+  hues = seq(15, 375, length = n + 1)
+  hcl(h = hues, l = 65, c = 100)[1:n]
+}
+
+```
+
+## Seurat processing 
+
+cell ranger mkfastq and count was used to align, quantify, and provide 
+basic quality control metrics for the scRNA-seq data. 
+
+
+The processed data from the cell ranger pipeline can be downloaded from GSE198524. 
+Once downloaded and saved to 'data_dir' , we read it in and and build a seurat object.
+
+```{r}
+rep1 <- Read10X(data.dir = data_dir)
+rep2 <- Read10X(data.dir = data_dir)
+rep3 <- Read10X(data.dir = data_dir)
+mydata = cbind(odata1, odata2,  data2)
+
+seurat2 <- CreateSeuratObject(counts =  mydata,  assay = "RNA")
+
+mito.genes <- grep("MT", rownames(seurat2))
+rb.genes <- grep("RP", rownames(seurat2))
+percent.mito <- Matrix::colSums(seurat2@assays[["RNA"]][mito.genes, ])/Matrix::colSums(seurat2@assays[["RNA"]])
+percent.rb <- Matrix::colSums(seurat2@assays[["RNA"]][rb.genes, ])/Matrix::colSums(seurat2@assays[["RNA"]])
+df = data.frame(barcode = colnames(seurat2) , 
+    sampleName ="827", 
+    type = c(rep("rep1", ncol(odata1)), rep("rep2", ncol(odata2)), rep("rep3", ncol(data2))  ),
+    batch = c(rep("batch1", ncol(odata1)),  rep("batch2", ncol(odata2)), rep("batch3", ncol(data2))  ))
+
+seurat2 <- AddMetaData(seurat2, percent.mito, col.name = "percent.mito")
+seurat2 <- AddMetaData(seurat2, percent.rb, col.name = "percent.ribo")
+seurat2 <- AddMetaData(seurat2, df$barcode, col.name = "barcode")
+seurat2 <- AddMetaData(seurat2, df$type, col.name = "type")
+seurat2 <- AddMetaData(seurat2, df$batch, col.name = "batch")
+seurat2 <- AddMetaData(seurat2, df$sampleName, col.name = "sampleName")
+```
+
+## Quality control 
+
+```{r}
+plot(seurat2@meta.data$nCount_RNA, seurat2@meta.data$percent.mito, main =tag,
+     xlab = "nCount_RNA", ylab = "percent.mito", pch = 20)
+abline(v = 3000, col = "red", lwd =3, lty =2)
+abline(v = 80000, col = "red", lwd =3, lty =2)
+abline(h = 0.04 , col = "red", lwd =3, lty =2)
+abline (h = 0.2, col = "red", lwd =3, lty =2)
+
+keep.detect <- which(seurat2@meta.data$percent.mito < 0.2 & 
+                       seurat2@meta.data$percent.mito > 0.04 & 
+                       seurat2@meta.data$nCount_RNA < 80000 & 
+                       seurat2@meta.data$nCount_RNA > 3000)
+
+seurat3 <- subset(seurat2, cells=colnames(seurat2)[keep.detect])
+```
+
+## Building the integrated reference 
+
+```{r}
+
+seurat.list <- SplitObject(seurat3, split.by = "batch")
+for (i in 1:length(seurat.list)) {
+  seurat.list[[i]] <- SCTransform(seurat.list[[i]], 
+                                  vars.to.regress = c("nCount_RNA", "nFeature_RNA", "percent.mito"), 
+                                  verbose = FALSE)
+}
+features <- SelectIntegrationFeatures(seurat.list, nfeatures = 5000)
+seurat.list2 <- PrepSCTIntegration(object.list = seurat.list, anchor.features = features)
+gsc.anchors <- FindIntegrationAnchors(object.list = seurat.list2, normalization.method = "SCT", 
+                                           anchor.features = features, verbose = FALSE)
+gsc.integrated <- IntegrateData(anchorset = gsc.anchors, normalization.method = "SCT", 
+                                     verbose = FALSE)
+
+gsc.integrated <- RunPCA(gsc.integrated, verbose = FALSE)
+gsc.integrated <- RunUMAP(gsc.integrated, dims = 1:30, return.model = TRUE)
+gsc.integrated <- FindNeighbors(gsc.integrated,   dims = 1:30)
+gsc.integrated <- FindClusters(gsc.integrated)
+
+m1 <- DimPlot(gsc.integrated, group.by = c("type")) + ylim(c( -5,5)) +  xlim(c( -6, 5))
+m2 = DimPlot(gsc.integrated, label = T, label.size = 6) + ylim(c( -5,5)) +  xlim(c( -6, 5)) # show clusters
+
+```
+
+## Make Violin plots to check quality of clustering
+
+
+```{r}
+cluster_no = length(unique(pancreas.integrated$seurat_clusters))
+my_5cols = gg_color_hue(cluster_no)
+v1 = VlnPlot(object = gsc.integrated, features= "nFeature_RNA", split.by="seurat_clusters", cols = my_5cols,  pt.size=0.1)
+v2 = VlnPlot(object = gsc.integrated, features= "nCount_RNA", split.by="seurat_clusters", cols = my_5cols ,  pt.size=0.1)
+v3 = VlnPlot(object = gsc.integrated, features= "percent.ribo", split.by="seurat_clusters", cols = my_5cols ,  pt.size=0.1)
+v4 = VlnPlot(object = gsc.integrated, features= "percent.mito", split.by="seurat_clusters", cols = my_5cols ,  pt.size=0.1)
+
+lst4 = list(m1, m2, v1, v2, v3, v4)
+grid.arrange(grobs = lst4, layout_matrix = rbind(c(1,2,3),c( 4,5,6)))
+```
+
+## Find differentially expressed genes in each cluster
+
+```{r}
+log2_thres = log2(1.25)
+fdr_thres=0.05
+cluster_markers= FindAllMarkers(gsc.integrated, logfc.threshold = 0.25)
+cluster_no = unique(cluster_markers$cluster)
+
+sp = split(cluster_markers, cluster_markers$cluster)
+names(sp) = paste0("cluster-", names(sp))
+write_xlsx(sp, path = "GSC827_scTransform_Markers_by_cluster.xlsx")
+```
+
+## cell cycle scoring using Seurat
+
+```{r}
+s.genes <- cc.genes$s.genes
+g2m.genes <- cc.genes$g2m.genes
+pancreas.integrated <- CellCycleScoring(object=gsc.integrated, s.features=s.genes, g2m.features=g2m.genes, set.ident=FALSE)
+
+m3 =  DimPlot(gsc.integrated, reduction = "umap", group.by="Phase" ) + 
+  ggtitle("ccSeurat") + gsc.integrated(c( -5,5)) +  xlim(c( -6, 5))
+
+```
+
+## Calculate the average expression levels of different gene lists of interest
+
+```{r}
+cell_cycle_module = list(c("PLK1", "MAPK13","AURKA","CENPE",
+                           "TPX2", "CKS2",  "BUB1","ARL6IP1",
+                           "CENPF","DLGAP5","UBE2S",
+                           "NUF2", "HMMR",  "CDC20",  "ZC3HC1",
+                           "LRRC17","FAM64A","BIRC5", "DEPDC1B",
+                           "SAPCD2","CCNB1", "G2E3",  "GTSE1",
+                           "GCSAM", "GPSM2", "CDC25B","SRD5A1", "MCM4",
+                           "ADH4","RAD21","ERN2", "HSPA1L",
+                           "SMTN","ANLN", "TROAP","NEK2",
+                           "CEP55","DEPDC1","CCNB2",
+                           "CKAP5","LBR", "PCF11","OLR1",
+                           "LPP",  "KIF5B", "PSMG3","HBG2",
+                           "SLC17A2","C15orf23","MZT1","PLAG1",
+                           "KBTBD2", "ECT2","IDO1","BIRC2",
+                           "VANGL1", "GAS6","DNAJB1","SPAG5",
+                           "BTBD3", "PRR11",  "HMGB3","XPO4", "LRIF1"))
+
+opc_module = read.delim("data/toppcell_atlas_OPC_genes.txt", header=F, stringsAsFactors = FALSE)[,1]
+opc_module = list(opc_module)
+
+ORG_module = read.delim("data/toppcell_atlas_ORG_genes.txt", header=T, stringsAsFactors = FALSE)[,2]
+ORG_module = list(ORG_module)
+
+
+hypoxia = read.delim("data/hypoxia_gene_set.txt", header=T, stringsAsFactors = FALSE)$Symbol
+hypoxia = list(hypoxia)
+
+gsc.integrated <- AddModuleScore(object = gsc.integrated, features = cell_cycle_module,  
+                                 ctrl = 5, name = 'mitosis_features')
+gsc.integrated <- AddModuleScore(object = gsc.integrated, features = opc_module,  
+                                 ctrl = 5, name = 'opc_features')
+gsc.integrated <- AddModuleScore(object = gsc.integrated, features = ORG_module,  
+                                 ctrl = 5, name = 'ORG_features')
+gsc.integrated <- AddModuleScore(object = gsc.integrated, features = hypoxia,  
+                                 ctrl = 5, name = 'hypoxia_features')
+
+VlnPlot(object = gsc.integrated, features= c("ORG_features1"), split.by = "seurat_clusters", cols = cluster_cols)  + 
+  ggtitle("oRG") + theme(   axis.text.x = element_blank(),  axis.ticks = element_blank()) 
+
+VlnPlot(object = gsc.integrated, features= c("mitosis_features1"), split.by = "seurat_clusters", cols = cluster_cols)  + 
+  ggtitle("Mitosis") + theme(    axis.text.x = element_blank(),  axis.ticks = element_blank()) 
+
+VlnPlot(object = gsc.integrated, features= c("opc_features1"), split.by = "seurat_clusters", cols = cluster_cols)  + 
+  ggtitle("OPC") + theme(   axis.text.x = element_blank(),  axis.ticks = element_blank()) 
+
+VlnPlot(object = gsc.integrated, features= c("hypoxia_features1"), split.by = "seurat_clusters", cols = cluster_cols)  + 
+  ggtitle("Hypoxia") + theme(   axis.text.x = element_blank(),  axis.ticks = element_blank()) 
+
+
+```
+
+## Heatmap for genes 
+
+```{r}
+neuralGO_geneset = c("SCRG1", "PLP1", "S100B", "GPM6B", "BEX1", "PTPRZ1", "PRCP", "PTN", "SOX4", "SAT1")
+G1_geneset = c("IGFBP3", "IGFBP5", "MIAT", "MAP3K7CL", "AHNAK2", "TPST2", "DLG1" , "CMTM7", "C6orf15", "GJB2")
+late_G1_geneset = c("EDN1", "CYR61", "ANKRD1", "CTGF", "PLK2", "UGCG", "ARID5B", "PLAU", "CCL2")
+S_geneset = c("CCNE2", "CLSPN", "GINS2", "PCNA", "ATAD2", "MCM7", "MCM3", "SLBP", "GMNN", "KIAA0101")
+s_g2_geneset = c("HIST1H4C", "CDK1", "HIST1H1E", "HIST1H1B", "UBE2C", "RRM2", "ZWINT", "HIST1H1C", "HMGB2")
+G2_M_geneset = c("CCNB1", "CENPF", "CKS2", "PTTG1", "CDC20", "TOP2A", "NUSAP1", "CENPA")
+M_early_G1_geneset = c("HMGN2", "TUBA1B", "STMN1", "BIRC5", "HMGB1", "TROAP", "HNRNPA2B1", "H2AFZ", "ARL6IP1")
+goi_lst = list(neuralGO_geneset,G1_geneset, late_G1_geneset, S_geneset, s_g2_geneset, G2_M_geneset, M_early_G1_geneset )
+sapply(goi_lst, length)
+
+DefaultAssay(gsc.integrated) = "integrated"
+pdf( "Heatmap_genes.pdf", width =15, height = 10)
+DoHeatmap(object = gsc.integrated, features=unlist(goi_lst))
+dev.off()
+```
+
+
+## save results
+
+```{r}
+saveRDS(gsc.integrated, file = file.path("seurat_objects",  paste0(tag,".Rds") ))
+```
