@@ -1,0 +1,282 @@
+---
+title: "Building the GSC 827 integrated reference"
+author: "Sonali Arora"
+date: "March 17, 2022"
+output:
+  html_document:
+    toc: true
+    theme: united
+---
+
+
+```{r setup}
+
+
+rm(list=ls())
+
+#------------------------
+# setup section 
+#-----------------------
+library(Seurat)
+library(ggplot2)
+library(grid)
+library(gridExtra)
+library(SeuratWrappers)
+library(clusterProfiler)
+library(enrichR)
+library(writexl)
+library(data.table)
+library(magrittr)
+library(dplyr)
+
+gg_color_hue <- function(n) {
+  hues = seq(15, 375, length = n + 1)
+  hcl(h = hues, l = 65, c = 100)[1:n]
+}
+
+buildQueryDataset <- function(data_dir, tag){
+  # normalization. ( same way as integrated ref)
+  seurat2 <- SCTransform(seurat2,  vars.to.regress = c("nCount_RNA", "nFeature_RNA", "percent.mito"), 
+                         verbose = FALSE)
+  
+  # load reference. 
+  ref = readRDS(file.path(resdir, "seurat_objects/GSC827_integrated_reference_Sctransform.Rds"))
+  
+  # find anchors. 
+  anchors <- FindTransferAnchors(
+    reference = ref,
+    query = seurat2,
+    normalization.method = "SCT",
+    reference.reduction = "pca",
+    dims = 1:50
+  )
+  
+  seurat2 <- MapQuery(
+    anchorset = anchors,
+    query = seurat2,
+    reference = ref,
+    refdata = list(original_clusters = "seurat_clusters"),
+    reference.reduction = "pca", 
+    reduction.model = "umap"
+  )
+  
+  
+  seurat2$score2 = seurat2@meta.data$predicted.original_clusters.score
+  seurat2$score2[which(seurat2$score2 >= 0.5) ] = "0.5-1"
+  seurat2$score2[which(seurat2$score2 < 0.5) ] = "< 0.5"
+  
+  
+  
+  a1 = DimPlot(seurat2, reduction = "ref.umap", 
+               label.size = 3, repel = TRUE) + NoLegend() + 
+    ggtitle(paste0("Query ", tag,  " transferred labels")) + 
+    ylim(c( -5,5)) +  xlim(c( -6, 5))
+  
+  a2 = DimPlot(seurat2, group.by = "score2", cols = c("red", "darkgreen"), reduction = "ref.umap", pt.size = 1.5) + 
+          ggtitle(paste0(tag, ":Predicted Score for cells")) +  ylim(c( -5,5)) +  xlim(c( -6, 5))
+  pdf(file.path(resdir, paste0(tag, "_anchor_score.pdf")))
+  print(a1)
+  print(a2)
+  dev.off()
+  
+  # remove cells with predicted score < 0.5
+  keep.detect1 <- which(seurat2@meta.data$predicted.original_clusters.score > 0.5)
+  seurat2 <- subset(seurat2, cells=colnames(seurat2)[keep.detect1])
+  
+  # cell cycle scoring - ccSeurat
+  s.genes <- cc.genes$s.genes
+  g2m.genes <- cc.genes$g2m.genes
+  seurat2 <- CellCycleScoring(object=seurat2, s.features=s.genes, g2m.features=g2m.genes, set.ident=FALSE)
+  
+  saveRDS(seurat2, file = file.path(resdir, "seurat_objects",  paste0(tag,".Rds") ))
+
+}
+
+makeplots <- function(seurat2, tag){
+  
+  # umap showing transferred labels
+  seurat2$clusters = seurat2@meta.data$predicted.original_clusters
+  b1 = DimPlot(seurat2, reduction = "ref.umap",  group.by="clusters",  label =T, label.size= 8)  +
+    ggtitle(paste0("Query ", tag,  " transferred labels")) +
+    ylim(c( -5,5)) +  xlim(c( -6, 5))
+   
+  # umap showing cell cycle phases on mapped query. 
+  b2=  DimPlot(seurat2, reduction = "ref.umap", group.by="Phase" , 
+               label.size = 3, cols = c("purple", "darkgreen", "orange")) + 
+    ggtitle(paste0("Query ", tag, " ccSeurat")) + 
+    xlim(c( -6, 5)) + ylim(c( -5, 5))
+  
+  # barplot 1: No of cells in each cluster
+  t1 = as.data.frame( table(seurat2@meta.data$predicted.original_clusters) )
+  colnames(t1) = c("cluster", "cells")
+  my_5cols = gg_color_hue(nrow(t1))
+  
+  p1 <-ggplot(data=t1, aes(x=cluster, y=cells, fill = cluster)) + xlab("Integrated UMAP Clusters") + ylab("No of cells") +
+    geom_bar(stat="identity") +
+    geom_text(aes(label=cells), vjust=1.6, color="black",
+              position = position_dodge(0.9), size=5.5) + theme_bw() + 
+    theme(  axis.text=element_text(size=20),
+            axis.title=element_text(size=20))
+  
+  # barplot 2: No of cells in each phase of cell cycle
+  md  = seurat2@meta.data[, c("Phase", "predicted.original_clusters")]  %>% as.data.table
+  t2 =md[, .N, by = c("Phase", "predicted.original_clusters")] %>% dcast(., Phase ~ predicted.original_clusters, value.var = "N")
+  t2 = as.data.frame(t2)
+  rownames(t2) = t2[, 1]
+  t2 = t2[, -1]
+  t2 = t(t2)
+  t2[is.na(t2)] = 0 
+  t2 = reshape2::melt(t2)
+  colnames(t2) = c("cluster", "cell.cycle", "cells")
+  df2 <- t2 %>%
+    group_by(cluster) %>%
+    arrange(cluster, desc(cell.cycle)) %>%
+    mutate(lab_ypos = cumsum(cells) - 0.5 * cells) 
+  
+  idx = which(df2$cells==0)
+  if(length(idx)!=0){
+    df2 = df2[ -idx, ]
+  }
+  
+  p2 = ggplot(data = df2, aes(x = cluster, y = cells)) +
+    geom_col(aes(fill = cell.cycle), width = 0.7)+
+    geom_text(aes(y = lab_ypos, label = cells, group =cell.cycle), color = "white",  size=3.5) +
+    scale_fill_manual(values = c("purple", "darkgreen", "orange")) +
+    theme_bw() + 
+    xlab("Integrated UMAP Clusters") + ylab("No of cells") +
+    theme(  axis.text=element_text(size=20),
+            axis.title=element_text(size=20))
+  
+  
+  pdf(file.path("figures", paste0("query_integration_", tag, ".pdf")))
+  print(b1)
+  print(b2)
+  print(p1)
+  print(p2)
+  dev.off()
+
+}
+```
+
+
+# p27Hi tumor cells
+
+```{r}
+# create object
+tag = "GSC827_p27Hi"
+data <- Read10X(data.dir = data_dir)
+seurat1 <- CreateSeuratObject(counts =  data,  assay = "RNA", min.cells = 10)
+
+# add to meta.data
+mito.genes <- grep("^MT", rownames(seurat1))
+rb.genes <- grep("^RP", rownames(seurat1))
+percent.mito <- Matrix::colSums(seurat1@assays[["RNA"]][mito.genes, ])/Matrix::colSums(seurat1@assays[["RNA"]])
+percent.rb <- Matrix::colSums(seurat1@assays[["RNA"]][rb.genes, ])/Matrix::colSums(seurat1@assays[["RNA"]])
+seurat1 <- AddMetaData(seurat1, percent.mito, col.name = "percent.mito")
+seurat1 <- AddMetaData(seurat1, percent.rb, col.name = "percent.ribo")
+seurat1$type = tag
+
+# filtering. 
+pdf(file.path(resdir, paste0(tag, "_qc_filtering.pdf")))
+plot(seurat1@meta.data$nCount_RNA, seurat1@meta.data$percent.mito, main =tag,
+     xlab = "nCount_RNA", ylab = "percent.mito", pch = 20)
+abline(v = 2000, col = "red", lwd =3, lty =2)
+abline(v = 45000, col = "red", lwd =3, lty =2)
+abline(h = 0.03 , col = "red", lwd =3, lty =2)
+abline (h = 0.15, col = "red", lwd =3, lty =2)
+dev.off()
+keep.detect1 <- which(seurat1@meta.data$percent.mito < 0.15 & 
+                        seurat1@meta.data$percent.mito > 0.03 & 
+                        seurat1@meta.data$nCount_RNA < 45000 & 
+                        seurat1@meta.data$nCount_RNA > 2000)
+
+seurat2 <- subset(seurat1, cells=colnames(seurat1)[keep.detect1])
+
+# perform  integration
+seu_obj = buildQueryDataset(seurat2, tag)
+
+# create plots. 
+makeplots(seu_obj, tag)
+```
+
+
+
+# GSC827 Kat5 off tumor cells
+
+```{r}
+# create object
+tag = "GSC827_Kat5off"
+data <- Read10X(data.dir = data_dir)
+seurat1 <- CreateSeuratObject(counts =  data,  assay = "RNA", min.cells = 10)
+
+# add to meta.data
+mito.genes <- grep("^MT", rownames(seurat1))
+rb.genes <- grep("^RP", rownames(seurat1))
+percent.mito <- Matrix::colSums(seurat1@assays[["RNA"]][mito.genes, ])/Matrix::colSums(seurat1@assays[["RNA"]])
+percent.rb <- Matrix::colSums(seurat1@assays[["RNA"]][rb.genes, ])/Matrix::colSums(seurat1@assays[["RNA"]])
+seurat1 <- AddMetaData(seurat1, percent.mito, col.name = "percent.mito")
+seurat1 <- AddMetaData(seurat1, percent.rb, col.name = "percent.ribo")
+seurat1$type = tag
+
+# filtering. 
+pdf(file.path(resdir, paste0(tag, "_qc_filtering.pdf")))
+plot(seurat1@meta.data$nCount_RNA, seurat1@meta.data$percent.mito, main =tag,
+     xlab = "nCount_RNA", ylab = "percent.mito", pch = 20)
+abline(v = 8000, col = "red", lwd =3, lty =2)
+abline(v = 70000, col = "red", lwd =3, lty =2)
+abline(h = 0.05 , col = "red", lwd =3, lty =2)
+abline (h = 0.2, col = "red", lwd =3, lty =2)
+dev.off()
+keep.detect1 <- which(seurat1@meta.data$percent.mito < 0.2 & 
+                        seurat1@meta.data$percent.mito > 0.05 & 
+                        seurat1@meta.data$nCount_RNA < 70000 & 
+                        seurat1@meta.data$nCount_RNA > 8000)
+seurat2 <- subset(seurat1, cells=colnames(seurat1)[keep.detect1])
+
+# perform  integration
+seu_obj = buildQueryDataset(seurat2, tag)
+
+# create plots. 
+makeplots(seu_obj, tag)
+```
+
+
+# GSC827 Kat5 on tumor cells
+
+```{r}
+# create object
+tag = "GSC827_Kat5on"
+data <- Read10X(data.dir = data_dir)
+seurat1 <- CreateSeuratObject(counts =  data,  assay = "RNA", min.cells = 10)
+
+# add to meta.data
+mito.genes <- grep("^MT", rownames(seurat1))
+rb.genes <- grep("^RP", rownames(seurat1))
+percent.mito <- Matrix::colSums(seurat1@assays[["RNA"]][mito.genes, ])/Matrix::colSums(seurat1@assays[["RNA"]])
+percent.rb <- Matrix::colSums(seurat1@assays[["RNA"]][rb.genes, ])/Matrix::colSums(seurat1@assays[["RNA"]])
+seurat1 <- AddMetaData(seurat1, percent.mito, col.name = "percent.mito")
+seurat1 <- AddMetaData(seurat1, percent.rb, col.name = "percent.ribo")
+seurat1$type = tag
+
+
+# filtering. 
+pdf(file.path(resdir, paste0(tag, "_qc_filtering.pdf")))
+plot(seurat1@meta.data$nCount_RNA, seurat1@meta.data$percent.mito, main =tag,
+     xlab = "nCount_RNA", ylab = "percent.mito", pch = 20)
+abline(v = 5000, col = "red", lwd =3, lty =2)
+abline(v = 70000, col = "red", lwd =3, lty =2)
+abline(h = 0.05 , col = "red", lwd =3, lty =2)
+abline (h = 0.2, col = "red", lwd =3, lty =2)
+dev.off()
+keep.detect1 <- which(seurat1@meta.data$percent.mito < 0.2 & 
+                        seurat1@meta.data$percent.mito > 0.05 & 
+                        seurat1@meta.data$nCount_RNA < 70000 & 
+                        seurat1@meta.data$nCount_RNA > 5000)
+seurat2 <- subset(seurat1, cells=colnames(seurat1)[keep.detect1])
+
+# perform  integration
+seu_obj = buildQueryDataset(seurat2, tag)
+
+# create plots. 
+makeplots(seu_obj, tag)
+```
