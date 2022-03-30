@@ -34,7 +34,7 @@ gg_color_hue <- function(n) {
   hcl(h = hues, l = 65, c = 100)[1:n]
 }
 
-buildQueryDataset <- function(data_dir, tag){
+buildQueryDataset <- function(seurat2, tag){
   # normalization. ( same way as integrated ref)
   seurat2 <- SCTransform(seurat2,  vars.to.regress = c("nCount_RNA", "nFeature_RNA", "percent.mito"), 
                          verbose = FALSE)
