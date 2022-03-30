@@ -10,3 +10,7 @@ the [Paddison Lab](https://research.fredhutch.org/paddison/en.html) at Fred Hutc
 2. [Seurat](https://satijalab.org/seurat/)
 3. [EnrichR](https://maayanlab.cloud/Enrichr/)
 4. [clusterProfiler](https://bioconductor.org/packages/release/bioc/html/clusterProfiler.html)
+5. [ccAF](https://github.com/plaisier-lab/ccAF)
+6. [scVelo](https://scvelo.readthedocs.io/)
+
+
